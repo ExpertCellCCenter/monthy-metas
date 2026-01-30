@@ -24,7 +24,7 @@ from openpyxl.utils import get_column_letter
 # CONFIG
 # -------------------------------
 st.set_page_config(
-    page_title="Ventas ExpertCell — Filtro Mes/Semana + Simulación Ejecutivo",
+    page_title="Metas Mensuales CC",
     page_icon="📈",
     layout="wide",
 )
