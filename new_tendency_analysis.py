@@ -1260,6 +1260,11 @@ today_d = date.today()
 start_rem = today_d if today_d > m_ini_tmp else m_ini_tmp
 dias_hab_eq_remaining = workable_equiv_between(start_rem, m_fin_tmp) if today_d <= m_fin_tmp else 0.0
 
+# ✅ FIX (ONLY for "desde hoy" rate): if remaining is Saturday-only (0.5), treat as 1.0 day for rate calc
+dias_hab_eq_remaining_for_rate = float(dias_hab_eq_remaining)
+if 0.0 < dias_hab_eq_remaining_for_rate < 1.0:
+    dias_hab_eq_remaining_for_rate = 1.0
+
 if dias_hab_eq_total <= 0:
     st.info("No se pudieron calcular días laborables equivalentes para el mes seleccionado.")
 else:
@@ -1306,8 +1311,8 @@ else:
     df_sanity_exec["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_pos = df_sanity_exec["gap_meta"].astype(float).clip(lower=0.0)
     df_sanity_exec["ventas_diarias_necesarias_desde_hoy"] = np.where(
-        float(dias_hab_eq_remaining) > 0.0,
-        gap_pos / float(dias_hab_eq_remaining),
+        float(dias_hab_eq_remaining_for_rate) > 0.0,
+        gap_pos / float(dias_hab_eq_remaining_for_rate),
         gap_pos,
     )
 
@@ -1422,8 +1427,8 @@ else:
     df_sanity_team["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_team_pos = df_sanity_team["gap_team"].astype(float).clip(lower=0.0)
     df_sanity_team["ventas_diarias_necesarias_desde_hoy"] = np.where(
-        float(dias_hab_eq_remaining) > 0.0,
-        gap_team_pos / float(dias_hab_eq_remaining),
+        float(dias_hab_eq_remaining_for_rate) > 0.0,
+        gap_team_pos / float(dias_hab_eq_remaining_for_rate),
         gap_team_pos,
     )
 
@@ -1510,8 +1515,8 @@ else:
     df_sanity_centro["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_centro_pos = df_sanity_centro["gap_centro"].astype(float).clip(lower=0.0)
     df_sanity_centro["ventas_diarias_necesarias_desde_hoy"] = np.where(
-        float(dias_hab_eq_remaining) > 0.0,
-        gap_centro_pos / float(dias_hab_eq_remaining),
+        float(dias_hab_eq_remaining_for_rate) > 0.0,
+        gap_centro_pos / float(dias_hab_eq_remaining_for_rate),
         gap_centro_pos,
     )
 
@@ -1589,8 +1594,8 @@ else:
     df_sanity_global["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_global_pos = df_sanity_global["gap_global"].astype(float).clip(lower=0.0)
     df_sanity_global["ventas_diarias_necesarias_desde_hoy"] = np.where(
-        float(dias_hab_eq_remaining) > 0.0,
-        gap_global_pos / float(dias_hab_eq_remaining),
+        float(dias_hab_eq_remaining_for_rate) > 0.0,
+        gap_global_pos / float(dias_hab_eq_remaining_for_rate),
         gap_global_pos,
     )
 
