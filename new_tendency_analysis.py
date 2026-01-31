@@ -1254,6 +1254,12 @@ def workable_days_equiv_elapsed_in_month(ym_key: str, today: date) -> float:
 dias_hab_eq_total = workable_days_equiv_month(meta_month_key)
 dias_hab_eq_elapsed = workable_days_equiv_elapsed_in_month(meta_month_key, date.today())
 
+# ✅ NEW: días laborables equivalentes RESTANTES desde HOY hasta fin de mes (incluye hoy)
+m_ini_tmp, m_fin_tmp = month_bounds(meta_month_key)
+today_d = date.today()
+start_rem = today_d if today_d > m_ini_tmp else m_ini_tmp
+dias_hab_eq_remaining = workable_equiv_between(start_rem, m_fin_tmp) if today_d <= m_fin_tmp else 0.0
+
 if dias_hab_eq_total <= 0:
     st.info("No se pudieron calcular días laborables equivalentes para el mes seleccionado.")
 else:
@@ -1296,6 +1302,15 @@ else:
     df_sanity_exec["esperado_a_hoy"] = np.floor(df_sanity_exec["meta_mes_actual"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_exec["al_corriente"] = df_sanity_exec["total_ventas_hechas_mes"].astype(int) >= df_sanity_exec["esperado_a_hoy"].astype(int)
 
+    # ✅ NEW: desde HOY — días restantes y ventas diarias necesarias para cumplir meta
+    df_sanity_exec["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
+    gap_pos = df_sanity_exec["gap_meta"].astype(float).clip(lower=0.0)
+    df_sanity_exec["ventas_diarias_necesarias_desde_hoy"] = np.where(
+        float(dias_hab_eq_remaining) > 0.0,
+        gap_pos / float(dias_hab_eq_remaining),
+        gap_pos,
+    )
+
     df_sanity_exec = df_sanity_exec[
         [
             "EJECUTIVO",
@@ -1309,12 +1324,15 @@ else:
             "gap_meta",
             "dias_hab_equiv_mes",
             "ventas_diarias_necesarias",
+            # ✅ NEW
+            "dias_hab_equiv_restantes",
+            "ventas_diarias_necesarias_desde_hoy",
         ]
     ].copy()
 
     df_sanity_exec = df_sanity_exec.sort_values(
-        ["gap_meta", "ventas_diarias_necesarias"],
-        ascending=[False, False],
+        ["gap_meta", "ventas_diarias_necesarias_desde_hoy", "ventas_diarias_necesarias"],
+        ascending=[False, False, False],
     ).reset_index(drop=True)
 
     fmt_sanity = {
@@ -1326,6 +1344,9 @@ else:
         "gap_meta": "{:,.0f}",
         "dias_hab_equiv_mes": "{:,.2f}",
         "ventas_diarias_necesarias": "{:,.2f}",
+        # ✅ NEW
+        "dias_hab_equiv_restantes": "{:,.2f}",
+        "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
     }
 
     tmp_for_style = df_sanity_exec[["EJECUTIVO", "total_ventas_hechas_mes", "meta_mes_actual"]].copy()
@@ -1396,7 +1417,20 @@ else:
     df_sanity_team["ventas_diarias_necesarias"] = df_sanity_team["meta_team"].astype(float) / float(dias_hab_eq_total)
     df_sanity_team["esperado_a_hoy"] = np.floor(df_sanity_team["meta_team"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_team["al_corriente"] = df_sanity_team["total_ventas_hechas"].astype(int) >= df_sanity_team["esperado_a_hoy"].astype(int)
-    df_sanity_team = df_sanity_team.sort_values(["gap_team", "ventas_diarias_necesarias"], ascending=False).reset_index(drop=True)
+
+    # ✅ NEW: desde HOY (team)
+    df_sanity_team["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
+    gap_team_pos = df_sanity_team["gap_team"].astype(float).clip(lower=0.0)
+    df_sanity_team["ventas_diarias_necesarias_desde_hoy"] = np.where(
+        float(dias_hab_eq_remaining) > 0.0,
+        gap_team_pos / float(dias_hab_eq_remaining),
+        gap_team_pos,
+    )
+
+    df_sanity_team = df_sanity_team.sort_values(
+        ["gap_team", "ventas_diarias_necesarias_desde_hoy", "ventas_diarias_necesarias"],
+        ascending=False
+    ).reset_index(drop=True)
 
     st.markdown("#### 🧩 Por Team (Supervisor)")
 
@@ -1437,6 +1471,9 @@ else:
                 "dias_hab_equiv_mes": "{:,.2f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
+                # ✅ NEW
+                "dias_hab_equiv_restantes": "{:,.2f}",
+                "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
         ).apply(
             lambda r: (
@@ -1468,7 +1505,20 @@ else:
     df_sanity_centro["ventas_diarias_necesarias"] = df_sanity_centro["meta_centro"].astype(float) / float(dias_hab_eq_total)
     df_sanity_centro["esperado_a_hoy"] = np.floor(df_sanity_centro["meta_centro"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_centro["al_corriente"] = df_sanity_centro["total_ventas_hechas"].astype(int) >= df_sanity_centro["esperado_a_hoy"].astype(int)
-    df_sanity_centro = df_sanity_centro.sort_values(["gap_centro", "ventas_diarias_necesarias"], ascending=False).reset_index(drop=True)
+
+    # ✅ NEW: desde HOY (centro)
+    df_sanity_centro["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
+    gap_centro_pos = df_sanity_centro["gap_centro"].astype(float).clip(lower=0.0)
+    df_sanity_centro["ventas_diarias_necesarias_desde_hoy"] = np.where(
+        float(dias_hab_eq_remaining) > 0.0,
+        gap_centro_pos / float(dias_hab_eq_remaining),
+        gap_centro_pos,
+    )
+
+    df_sanity_centro = df_sanity_centro.sort_values(
+        ["gap_centro", "ventas_diarias_necesarias_desde_hoy", "ventas_diarias_necesarias"],
+        ascending=False
+    ).reset_index(drop=True)
 
     st.markdown("#### 🏢 Por Centro (JV / CC2)")
 
@@ -1500,6 +1550,9 @@ else:
                 "dias_hab_equiv_mes": "{:,.2f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
+                # ✅ NEW
+                "dias_hab_equiv_restantes": "{:,.2f}",
+                "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
         ).apply(
             lambda r: (
@@ -1531,6 +1584,15 @@ else:
     )
     df_sanity_global["esperado_a_hoy"] = int(np.floor(df_sanity_global["meta_global"].astype(float).iloc[0] * ratio + 1e-9))
     df_sanity_global["al_corriente"] = int(df_sanity_global["total_ventas_hechas"].iloc[0]) >= int(df_sanity_global["esperado_a_hoy"].astype(int).iloc[0])
+
+    # ✅ NEW: desde HOY (global)
+    df_sanity_global["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
+    gap_global_pos = df_sanity_global["gap_global"].astype(float).clip(lower=0.0)
+    df_sanity_global["ventas_diarias_necesarias_desde_hoy"] = np.where(
+        float(dias_hab_eq_remaining) > 0.0,
+        gap_global_pos / float(dias_hab_eq_remaining),
+        gap_global_pos,
+    )
 
     st.markdown("#### 🌎 Global")
 
@@ -1566,6 +1628,9 @@ else:
                 "gap_global": "{:,.0f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
+                # ✅ NEW
+                "dias_hab_equiv_restantes": "{:,.2f}",
+                "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
         ).apply(highlight_gap_global, axis=1),
         hide_index=True,
