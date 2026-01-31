@@ -564,6 +564,35 @@ month_map_all = (
     .sort_values("T_MonthKey")
 )
 
+# ✅ NEW: build Fecha Ingreso map (by normalized name) for tenure + nuevos ingresos
+emp_ing = empleados[["Nombre", "Fecha Ingreso"]].copy()
+emp_ing["Nombre"] = emp_ing["Nombre"].astype(str).str.strip()
+emp_ing["EJ_NORM"] = emp_ing["Nombre"].map(normalize_name)
+emp_ing["Fecha Ingreso"] = pd.to_datetime(emp_ing["Fecha Ingreso"], errors="coerce")
+emp_ing = emp_ing[emp_ing["EJ_NORM"].notna() & (emp_ing["EJ_NORM"] != "")].copy()
+# if duplicates, keep earliest ingreso (stable)
+ingreso_map_norm = (
+    emp_ing.dropna(subset=["Fecha Ingreso"])
+    .groupby("EJ_NORM")["Fecha Ingreso"]
+    .min()
+    .to_dict()
+)
+
+# fallback map (from ventas) in case an ejecutivo doesn't exist in empleados
+ventas_norm_all = ventas.copy()
+ventas_norm_all["EJ_NORM"] = ventas_norm_all["EJECUTIVO"].astype(str).map(normalize_name)
+first_dt_ventas_norm = (
+    ventas_norm_all.groupby("EJ_NORM")["T_DT"]
+    .min()
+    .to_dict()
+)
+
+def _get_ingreso_dt_for_norm(ej_norm: str):
+    v = ingreso_map_norm.get(ej_norm)
+    if pd.isna(v) or v is None:
+        return first_dt_ventas_norm.get(ej_norm)
+    return v
+
 # ✅ ADDED: Global filters (Supervisor + Ejecutivo) applied to ALL tables
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔎 Filtros (Supervisor / Ejecutivo)")
@@ -770,28 +799,21 @@ avg_active = np.where(has_nonzero, avg_active, 0.0)
 
 df_sim["Promedio ventas meses"] = avg_active.astype(float)
 
-last_month_interval = month_cols[-1]
+# ✅ last month of interval = chronologically max (NOT selection order)
+last_month_interval = max(month_cols) if month_cols else ""
 df_sim["status"] = np.where(df_sim[last_month_interval] > 0, "ACTIVO", "BAJA")
 
-ventas_norm = ventas_flt.copy()
-ventas_norm["EJ_NORM"] = ventas_norm["EJECUTIVO"].astype(str).map(normalize_name)
-first_dt_global_norm = (
-    ventas_norm.groupby("EJ_NORM")["T_DT"]
-    .min()
-    .to_dict()
-)
-
+# ✅ Fecha Ingreso (preferred) + fallback to first sale date
 df_sim["EJ_NORM"] = df_sim["EJECUTIVO"].astype(str).map(normalize_name)
-first_dt_exec = pd.to_datetime(df_sim["EJ_NORM"].map(first_dt_global_norm), errors="coerce")
+first_dt_exec = pd.to_datetime(df_sim["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
 
-# ✅ FIX: meta simulacion using SAME rules as meta_mes_actual
-yy2, mm2 = str(last_month_interval).split("-")
-ref_day_sim = pd.Timestamp(year=int(yy2), month=int(mm2), day=1).normalize()
-
-# ✅ NEW: if interval includes CURRENT MONTH, simulate for NEXT MONTH (e.g. Jan selected => meta for Feb)
-cur_key_sim = date.today().strftime("%Y-%m")
-if str(last_month_interval) == str(cur_key_sim):
-    ref_day_sim = (ref_day_sim + pd.DateOffset(months=1)).normalize()
+# ✅ FIX: interval simulates metas for the NEXT month after the last month in the interval (always)
+# Example: Oct-Nov-Dec => metas for Jan (ref_day_sim = Jan 1)
+if last_month_interval:
+    yy2, mm2 = str(last_month_interval).split("-")
+    ref_day_sim = pd.Timestamp(year=int(yy2), month=int(mm2), day=1).normalize() + pd.DateOffset(months=1)
+else:
+    ref_day_sim = pd.Timestamp(date.today().year, date.today().month, 1).normalize()
 
 df_sim["dias_activo_al_1ro"] = (
     (ref_day_sim - first_dt_exec.dt.normalize()).dt.days
@@ -817,12 +839,16 @@ df_sim["meta simulacion"] = np.where(
     )
 ).astype(int)
 
+# ✅ NUEVOS INGRESOS (Simulación): people whose Fecha Ingreso is in the TARGET month (next month)
+# and started AFTER day 9
+target_month_sim = ref_day_sim.strftime("%Y-%m")
 nuevos_ingresos = set(
     df_sim.loc[
-        (first_dt_exec.dt.strftime("%Y-%m") == str(last_month_interval)) & (first_dt_exec.dt.day > 9),
+        (first_dt_exec.dt.strftime("%Y-%m") == str(target_month_sim)) & (first_dt_exec.dt.day > 9),
         "EJECUTIVO",
     ].tolist()
 )
+nuevos_ingresos_norm = set(normalize_name(x) for x in nuevos_ingresos)
 
 # ✅ NEW: BAJA => meta simulacion = 0
 df_sim.loc[df_sim["status"] == "BAJA", "meta simulacion"] = 0
@@ -847,7 +873,8 @@ fmt_sim.update({"Promedio ventas meses": "{:,.2f}"})
 def highlight_rows_sim(row: pd.Series):
     if row.get("status") == "BAJA":
         return ["background-color: #ff1f3d; color: white; font-weight: 900;"] * len(row)
-    if row.get("EJECUTIVO") in nuevos_ingresos:
+    ej = normalize_name(row.get("EJECUTIVO"))
+    if ej in nuevos_ingresos_norm:
         return ["background-color: #ffd166; color: black; font-weight: 900;"] * len(row)
     return [""] * len(row)
 
@@ -986,8 +1013,9 @@ if df_metas.empty:
 yy, mm = meta_month_key.split("-")
 ref_day = pd.Timestamp(year=int(yy), month=int(mm), day=1).normalize()
 
+# ✅ Fecha Ingreso (preferred) + fallback to first sale date for tenure
 df_metas["EJ_NORM"] = df_metas["EJECUTIVO"].astype(str).map(normalize_name)
-fd = pd.to_datetime(df_metas["EJ_NORM"].map(first_dt_global_norm), errors="coerce")
+fd = pd.to_datetime(df_metas["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
 
 tenure_days = (ref_day - fd.dt.normalize()).dt.days
 tenure_days = (
@@ -1035,10 +1063,11 @@ meta_mes = np.where(
 
 df_metas["meta_mes_actual"] = meta_mes
 
-first_dt_exec2 = pd.to_datetime(df_metas["EJ_NORM"].map(first_dt_global_norm), errors="coerce")
+# ✅ NUEVOS INGRESOS (Metas): Fecha Ingreso in the selected meta_month_key and started AFTER day 9
+first_dt_exec2 = pd.to_datetime(df_metas["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
 nuevos_ingresos_metas = set(
     df_metas.loc[
-        (first_dt_exec2.dt.strftime("%Y-%m") == meta_month_key) & (first_dt_exec2.dt.day > 5),
+        (first_dt_exec2.dt.strftime("%Y-%m") == meta_month_key) & (first_dt_exec2.dt.day > 9),
         "EJECUTIVO",
     ].tolist()
 )
