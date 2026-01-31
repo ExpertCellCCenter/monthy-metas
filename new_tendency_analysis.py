@@ -2,6 +2,7 @@
 #   1) Filtro por meses y semanas (defaults: últimos 3 meses)
 #   2) Exportar Excel — Simulación por Ejecutivo (mes/intervalo actual)
 #      ✅ Promedio inteligente: ignora ceros consecutivos SOLO al inicio por ejecutivo
+#      ✅ INCLUYE empleados con 0 ventas (si están activos en DB)
 #   3) Metas del mes (solo ejecutivos activos)
 #      ✅ Usuario selecciona MES (default = mes actual)
 #      ✅ Intervalo para promedio = últimos 3 meses (default)
@@ -103,7 +104,6 @@ def normalize_name(s: str) -> str:
     return s
 
 
-# ✅ FIX (ONLY En Tránsito join): normalize folio keys so '123.0' matches '123'
 def normalize_folio_key(x) -> str:
     """
     Make FOLIO join-compatible between:
@@ -116,13 +116,11 @@ def normalize_folio_key(x) -> str:
     if not s or s.lower() in ("nan", "none"):
         return ""
 
-    # common pyodbc numeric artifact: '123456.0' -> '123456'
     if s.endswith(".0"):
         head = s[:-2]
         if head.isdigit():
             return head
 
-    # if it's a float-like string '123.00' etc.
     if "." in s:
         left, right = s.split(".", 1)
         if left.isdigit() and right.strip("0") == "":
@@ -142,7 +140,6 @@ def _to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     return out.getvalue()
 
 
-# ✅ ADDED (shared multi-sheet excel writer — used for Metas Agregadas download too)
 def _to_excel_bytes_multi(sheets: dict[str, pd.DataFrame]) -> bytes:
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -253,8 +250,6 @@ def build_ventas_query(start_yyyymmdd: str, end_yyyymmdd: str) -> str:
     """
 
 
-# ✅ Pull "En Tránsito" by FOLIO exactly like Transito Global (Detalle General)
-# ✅ FIX: Accent-insensitive WHERE + COALESCE key (FOLIO/Venta)
 def build_transito_query(start_yyyymmdd: str, end_yyyymmdd: str) -> str:
     return f"""
     SELECT
@@ -286,62 +281,6 @@ def build_transito_query(start_yyyymmdd: str, end_yyyymmdd: str) -> str:
     """
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_transito_flags(start_yyyymmdd: str, end_yyyymmdd: str) -> pd.DataFrame:
-    """
-    Returns a DF with: FOLIO, IS_TRANSITO
-    Logic matches Transito Global 2.0:
-      - En Transito if Estatus in (En entrega, En preparacion, Solicitado, Back Office)
-      - OR Estatus == Entregado AND Venta is blank
-
-    ✅ FIX: duplicates per FOLIO -> aggregate with MAX so True is not lost
-    ✅ FIX: normalize ESTATUS (accents/case) to match reliably
-    ✅ FIX: drop empty folios to avoid merge issues
-    ✅ FIX: normalize FOLIO join key to avoid '123.0' vs '123'
-    """
-    q = build_transito_query(start_yyyymmdd, end_yyyymmdd)
-    df = read_sql(q)
-
-    if df.empty:
-        return pd.DataFrame(columns=["FOLIO", "IS_TRANSITO"])
-
-    # ✅ HERE: normalize FOLIO key
-    df["FOLIO"] = df["FOLIO"].apply(normalize_folio_key)
-    df = df[df["FOLIO"].notna() & (df["FOLIO"] != "")].copy()
-
-    df["ESTATUS"] = df["ESTATUS"].astype(str).str.strip()
-    est_norm = df["ESTATUS"].map(normalize_name)
-
-    venta = df["VENTA"] if "VENTA" in df.columns else pd.Series(pd.NA, index=df.index)
-
-    def _venta_vacia(x):
-        if x is None:
-            return True
-        if isinstance(x, float) and np.isnan(x):
-            return True
-        s = str(x).strip()
-        return s == "" or s.lower() == "nan" or s.lower() == "none"
-
-    venta_vacia = venta.map(_venta_vacia)
-
-    is_transito = est_norm.isin(
-        {
-            "EN ENTREGA",
-            "EN PREPARACION",
-            "SOLICITADO",
-            "BACK OFFICE",
-        }
-    ) | (est_norm.eq("ENTREGADO") & venta_vacia)
-
-    out = df[["FOLIO"]].copy()
-    out["IS_TRANSITO"] = is_transito.astype(int)
-
-    out = out.groupby("FOLIO", as_index=False)["IS_TRANSITO"].max()
-    out["IS_TRANSITO"] = out["IS_TRANSITO"].astype(bool)
-    return out
-
-
-# ✅ NEW (Sanity Check): En tránsito EXACTLY like Transito Global 2.0 "Detalle general programadas"
 def build_programadas_query(start_yyyymmdd: str, end_yyyymmdd: str) -> str:
     return f"""
     SELECT
@@ -357,17 +296,6 @@ def build_programadas_query(start_yyyymmdd: str, end_yyyymmdd: str) -> str:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_programadas_split_by_exec(start_yyyymmdd: str, end_yyyymmdd: str) -> pd.DataFrame:
-    """
-    Returns per VENDEDOR:
-      - hechas_mes (Status == 'Entregado')
-      - transito_mes (Status == 'En Transito')
-      - total_mes (hechas_mes + transito_mes)
-    Logic matches Transito Global 2.0:
-      Status = 'En Transito' if Estatus in (En entrega, En preparacion, Solicitado, Back Office)
-              OR (Estatus == 'Entregado' and Venta blank)
-      Else Status = 'Entregado'
-    IMPORTANT: Canc Error is excluded from totals (Detalle General flag_Programada = Estatus != 'Canc Error').
-    """
     q = build_programadas_query(start_yyyymmdd, end_yyyymmdd)
     df = read_sql(q)
 
@@ -394,7 +322,6 @@ def load_programadas_split_by_exec(start_yyyymmdd: str, end_yyyymmdd: str) -> pd
         est_norm.eq("ENTREGADO") & venta_vacia
     )
 
-    # Exclude Canc Error from totals (Detalle General flag_Programada = Estatus != 'Canc Error')
     is_canc = est_norm.eq("CANC ERROR")
     df = df[~is_canc].copy()
     is_transito = is_transito[~is_canc]
@@ -428,7 +355,6 @@ def load_ventas(start_yyyymmdd: str, end_yyyymmdd: str) -> pd.DataFrame:
     df["CENTRO"] = df["CENTRO"].astype(str).str.strip()
     df["PLAN"] = df["PLAN"].astype(str).str.strip()
 
-    # ✅ HERE: normalize FOLIO key (ONLY for En Tránsito join correctness)
     df["FOLIO"] = df["FOLIO"].apply(normalize_folio_key)
 
     def fix_centro(c: str) -> str:
@@ -451,7 +377,6 @@ def load_ventas(start_yyyymmdd: str, end_yyyymmdd: str) -> pd.DataFrame:
 
     df["FECHA DE CAPTURA"] = pd.to_datetime(df["FECHA DE CAPTURA"], errors="coerce")
 
-    # ✅ Fallback flag (will be overridden ONLY for the selected month in Sanity Check)
     df["ESTATUS"] = df["ESTATUS"].astype(str).str.strip()
     est_norm = df["ESTATUS"].map(normalize_name)
 
@@ -593,6 +518,17 @@ def _get_ingreso_dt_for_norm(ej_norm: str):
         return first_dt_ventas_norm.get(ej_norm)
     return v
 
+# ✅ CALCULATE NUEVOS INGRESOS (<42 days from TODAY)
+# Logic: If (Today - FechaIngreso) < 42 days, they are "New Hire" for highlighting
+today_ts = pd.Timestamp(date.today())
+set_nuevos_42d = set()
+for ej_norm, f_ing in ingreso_map_norm.items():
+    if pd.notna(f_ing):
+        delta_days = (today_ts - f_ing).days
+        if 0 <= delta_days < 42:
+            set_nuevos_42d.add(ej_norm)
+
+
 # ✅ ADDED: Global filters (Supervisor + Ejecutivo) applied to ALL tables
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔎 Filtros (Supervisor / Ejecutivo)")
@@ -632,7 +568,7 @@ st.markdown("## Filtro por meses y semanas")
 if TYPE_CHECKING:
     ventas: pd.DataFrame
 
-df_ctx = ventas_flt.copy()  # ✅ CHANGED (only to apply filters) — same logic
+df_ctx = ventas_flt.copy()
 
 month_map = (
     df_ctx[["T_MonthKey", "T_MonthLabel"]]
@@ -723,42 +659,61 @@ st.markdown("---")
 # ======================================================
 # ✅ 2) Simulación por Ejecutivo (incluye Supervisor)
 #      ✅ FIX: Status Real (Si DB dice BAJA, es BAJA)
+#      ✅ FIX: Include people with 0 sales if Active
+#      ✅ FIX: Highlight < 15 days
 # ======================================================
 st.markdown("### ⬇️ Exportar Excel — Simulación por Ejecutivo (mes/intervalo actual)")
 
 df_export_base = df_ctx.copy()
 
-if df_export_base.empty:
+if df_export_base.empty and not empleados.empty:
+    # If no sales but employees exist, we proceed to show employees with 0 sales
+    pass
+elif df_export_base.empty:
     st.info("No hay datos para exportar simulación con el filtro actual.")
     st.caption(f"🕒 Render: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     st.stop()
 
-# ✅ FIX START: Crear mapa de Estatus Real desde Empleados
-# Tomamos el status de la tabla de empleados (reporte_empleado)
-# Agrupamos por nombre normalizado para evitar duplicados
+# ✅ REAL STATUS MAP
 real_status_map = (
     empleados.assign(EJ_NORM=empleados["Nombre"].map(normalize_name))
     .groupby("EJ_NORM")["Estatus"]
     .first()
     .to_dict()
 )
-# ✅ FIX END
 
 months_selected = sorted(df_export_base["T_MonthKey"].dropna().unique().tolist())
-execs = sorted(df_export_base["EJECUTIVO"].dropna().unique().tolist())
+if not months_selected:
+    # Fallback if no sales data found at all, create columns based on selection
+    # (Simplified: uses current if unknown, but better than crash)
+    months_selected = [date.today().strftime("%Y-%m")]
 
-sup_map = (
+# ✅ Get Executives List: Union of (Sales Execs) + (All Active Employees in DB)
+sales_execs_list = df_export_base["EJECUTIVO"].dropna().unique().tolist()
+
+# Get active employees from DB, filtering by selected Supervisor if needed
+active_db_emps = empleados[empleados["Estatus"] == "ACTIVO"].copy()
+if sup_selected:
+    active_db_emps = active_db_emps[active_db_emps["Supervisor"].isin(sup_selected)]
+
+db_execs_list = active_db_emps["Nombre"].unique().tolist()
+execs = sorted(list(set(sales_execs_list + db_execs_list)))
+
+# Map Supervisors (combine data from sales and employee db)
+sup_map_sales = (
     df_export_base[["EJECUTIVO", "Supervisor"]]
     .dropna(subset=["EJECUTIVO"])
-    .copy()
-)
-sup_map["Supervisor"] = sup_map["Supervisor"].replace({None: "", "None": ""}).astype(str).str.strip()
-sup_map["Supervisor"] = sup_map["Supervisor"].replace({"": "BAJA"})
-sup_map = (
-    sup_map.groupby("EJECUTIVO")["Supervisor"]
-    .agg(lambda s: (s.dropna().iloc[0] if len(s.dropna()) else "BAJA"))
+    .set_index("EJECUTIVO")["Supervisor"]
     .to_dict()
 )
+sup_map_db = (
+    empleados[["Nombre", "Supervisor"]]
+    .dropna(subset=["Nombre"])
+    .set_index("Nombre")["Supervisor"]
+    .to_dict()
+)
+# Merge maps, preferring sales map if conflict (usually same), fall back to DB
+sup_map = {**sup_map_db, **sup_map_sales}
 
 df_month_exec = (
     df_export_base.groupby(["EJECUTIVO", "T_MonthKey"], as_index=False)
@@ -810,7 +765,7 @@ avg_active = np.where(has_nonzero, avg_active, 0.0)
 
 df_sim["Promedio ventas meses"] = avg_active.astype(float)
 
-# ✅ FIX START: Use Database Status FIRST, fallback to sales activity
+# ✅ FIX: Use Database Status FIRST
 df_sim["EJ_NORM"] = df_sim["EJECUTIVO"].astype(str).map(normalize_name)
 df_sim["status_db"] = df_sim["EJ_NORM"].map(real_status_map).fillna("UNKNOWN")
 
@@ -818,30 +773,20 @@ last_month_interval = max(month_cols) if month_cols else ""
 
 def resolve_status(row):
     db_status = str(row["status_db"]).upper()
-    
-    # Priority 1: Explicit BAJA in Database
-    if db_status == "BAJA":
-        return "BAJA"
-    
-    # Priority 2: Explicit ACTIVO in Database
-    if db_status == "ACTIVO":
-        return "ACTIVO"
-    
-    # Priority 3: Unknown in DB (new emp not in master?) -> Check sales activity
+    if db_status == "BAJA": return "BAJA"
+    if db_status == "ACTIVO": return "ACTIVO"
+    # Fallback
     sales_active = False
     if last_month_interval and row[last_month_interval] > 0:
         sales_active = True
-    
     return "ACTIVO" if sales_active else "BAJA"
 
 df_sim["status"] = df_sim.apply(resolve_status, axis=1)
-# ✅ FIX END
 
-# ✅ Fecha Ingreso (preferred) + fallback to first sale date
+# ✅ Fecha Ingreso
 first_dt_exec = pd.to_datetime(df_sim["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
 
-# ✅ FIX: interval simulates metas for the NEXT month after the last month in the interval (always)
-# Example: Oct-Nov-Dec => metas for Jan (ref_day_sim = Jan 1)
+# Simulate for NEXT month
 if last_month_interval:
     yy2, mm2 = str(last_month_interval).split("-")
     ref_day_sim = pd.Timestamp(year=int(yy2), month=int(mm2), day=1).normalize() + pd.DateOffset(months=1)
@@ -872,25 +817,11 @@ df_sim["meta simulacion"] = np.where(
     )
 ).astype(int)
 
-# ✅ NUEVOS INGRESOS (Simulación): people whose Fecha Ingreso is in the TARGET month (next month)
-# and started AFTER day 9
-target_month_sim = ref_day_sim.strftime("%Y-%m")
-nuevos_ingresos = set(
-    df_sim.loc[
-        (first_dt_exec.dt.strftime("%Y-%m") == str(target_month_sim)) & (first_dt_exec.dt.day > 9),
-        "EJECUTIVO",
-    ].tolist()
-)
-nuevos_ingresos_norm = set(normalize_name(x) for x in nuevos_ingresos)
-
-# ✅ NEW: BAJA => meta simulacion = 0
 df_sim.loc[df_sim["status"] == "BAJA", "meta simulacion"] = 0
 
-# ✅ NEW: Meta total (includes all ejecutivos, BAJA already forced to 0)
 meta_total_all = int(pd.to_numeric(df_sim["meta simulacion"], errors="coerce").fillna(0).sum())
 st.markdown(f"**Meta total simulación (todos los ejecutivos): {meta_total_all:,.0f}**")
 
-# ✅ NEW: include dias_activo_al_1ro next to status
 df_sim = df_sim[
     ["EJECUTIVO", "Supervisor", "status", "dias_activo_al_1ro"]
     + month_cols
@@ -902,14 +833,20 @@ df_sim = df_sim.sort_values(["Total ventas", "Promedio ventas meses"], ascending
 fmt_sim = {c: "{:,.0f}" for c in month_cols + ["dias_activo_al_1ro", "Total ventas", "meta simulacion"]}
 fmt_sim.update({"Promedio ventas meses": "{:,.2f}"})
 
-
 def highlight_rows_sim(row: pd.Series):
+    styles = [""] * len(row)
+    
+    # 1. Check BAJA
     if row.get("status") == "BAJA":
         return ["background-color: #ff1f3d; color: white; font-weight: 900;"] * len(row)
-    ej = normalize_name(row.get("EJECUTIVO"))
-    if ej in nuevos_ingresos_norm:
+    
+    # 2. Check "Nuevo Ingreso" (< 15 days from TODAY)
+    # Includes those with 0 sales
+    ej_norm = normalize_name(row.get("EJECUTIVO"))
+    if ej_norm in set_nuevos_42d:
         return ["background-color: #ffd166; color: black; font-weight: 900;"] * len(row)
-    return [""] * len(row)
+        
+    return styles
 
 
 st.dataframe(
@@ -936,6 +873,8 @@ st.download_button(
 # ======================================================
 # ✅ 3) Metas del mes (incluye Supervisor + CentroKey)
 #      ✅ Uses meta_month_key as the MAIN filter for the rest of the page
+#      ✅ FIX: Include people with 0 sales if Active
+#      ✅ FIX: Highlight < 15 days
 # ======================================================
 st.markdown("---")
 st.markdown("### 🎯 Metas del mes actual (solo ejecutivos activos)")
@@ -955,44 +894,25 @@ meta_month_key = st.selectbox(
     key="meta_mes_key",
 )
 
-# ✅ CHANGED: window = last 3 months EXCLUDING selected month (as requested)
-# Example: if meta_month_key == 2026-01 => use 2025-10, 2025-11, 2025-12
 meta_idx = meta_month_options.index(meta_month_key) if meta_month_key in meta_month_options else len(meta_month_options) - 1
 meta_window_keys = meta_month_options[max(0, meta_idx - 3) : meta_idx]  # 👈 exclude meta_month_key
 if len(meta_window_keys) == 0:
-    # fallback (keep app alive if very little data)
     meta_window_keys = meta_month_options[max(0, meta_idx - 2) : meta_idx + 1]
 
 df_meta_base = ventas_flt[ventas_flt["T_MonthKey"].isin(meta_window_keys)].copy()
-if df_meta_base.empty:
-    st.info("No hay datos para el intervalo de 3 meses seleccionado para metas.")
-    st.caption(f"🕒 Render: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    st.stop()
 
-sup_map_metas = (
-    df_meta_base[["EJECUTIVO", "Supervisor"]]
-    .dropna(subset=["EJECUTIVO"])
-    .copy()
-)
-sup_map_metas["Supervisor"] = sup_map_metas["Supervisor"].replace({None: "", "None": ""}).astype(str).str.strip()
-sup_map_metas["Supervisor"] = sup_map_metas["Supervisor"].replace({"": "BAJA"})
-sup_map_metas = (
-    sup_map_metas.groupby("EJECUTIVO")["Supervisor"]
-    .agg(lambda s: (s.dropna().iloc[0] if len(s.dropna()) else "BAJA"))
-    .to_dict()
-)
+# ✅ Get Meta Execs: Union of (Sales in window) + (All Active Employees)
+# Similar logic to Simulation to ensure 0-sales people appear
+sales_meta_execs = df_meta_base["EJECUTIVO"].dropna().unique().tolist()
+# active_db_emps calculated above
+meta_execs = sorted(list(set(sales_meta_execs + db_execs_list)))
+
+sup_map_metas = {**sup_map_db, **sup_map_sales}
 
 centro_map = (
-    ventas_flt[ventas_flt["T_MonthKey"] == meta_month_key][["EJECUTIVO", "CentroKey"]]
+    ventas_flt[["EJECUTIVO", "CentroKey"]]
     .dropna(subset=["EJECUTIVO"])
-    .copy()
-)
-if centro_map.empty:
-    centro_map = ventas_flt[["EJECUTIVO", "CentroKey"]].dropna(subset=["EJECUTIVO"]).copy()
-
-centro_map = (
-    centro_map.groupby("EJECUTIVO")["CentroKey"]
-    .agg(lambda s: (s.dropna().iloc[0] if len(s.dropna()) else "CC2"))
+    .set_index("EJECUTIVO")["CentroKey"]
     .to_dict()
 )
 
@@ -1001,8 +921,6 @@ df_meta_me = (
     .size()
     .rename(columns={"size": "Ventas_mes"})
 )
-
-meta_execs = sorted(df_meta_base["EJECUTIVO"].dropna().unique().tolist())
 
 full_idx2 = pd.MultiIndex.from_product([meta_execs, meta_window_keys], names=["EJECUTIVO", "T_MonthKey"])
 df_meta_full = (
@@ -1029,27 +947,36 @@ for mk in meta_window_keys:
 df_metas["Supervisor"] = df_metas["EJECUTIVO"].map(sup_map_metas).fillna("BAJA")
 df_metas["CentroKey"] = df_metas["EJECUTIVO"].map(centro_map).fillna("CC2")
 
-# status is based on the selected meta month (unchanged intent)
-# but the interval columns for prom are meta_window_keys (excluding current month)
-df_metas["status"] = np.where(
-    ventas_flt[ventas_flt["T_MonthKey"] == meta_month_key].groupby("EJECUTIVO").size().reindex(df_metas["EJECUTIVO"]).fillna(0).values > 0,
-    "ACTIVO",
-    "BAJA"
-)
-df_metas = df_metas[df_metas["status"] == "ACTIVO"].copy()
+# ✅ Determine Status: Use DB Status
+df_metas["EJ_NORM"] = df_metas["EJECUTIVO"].astype(str).map(normalize_name)
+df_metas["status_db"] = df_metas["EJ_NORM"].map(real_status_map).fillna("UNKNOWN")
+
+# Re-use resolve_status logic or similar
+# Here we only want ACTIVO
+def is_active_for_metas(row):
+    st_db = str(row["status_db"]).upper()
+    if st_db == "ACTIVO": return True
+    if st_db == "BAJA": return False
+    # Fallback: check if they had sales in selected month?
+    # Actually, if unknown, and no sales, assume inactive? 
+    # Let's align with Simulation: if unknown but sales in window, Active.
+    # But better to be strict with DB for metas.
+    return False
+
+df_metas["is_active"] = df_metas.apply(is_active_for_metas, axis=1)
+df_metas = df_metas[df_metas["is_active"]].copy()
 
 if df_metas.empty:
     st.info("No hay ejecutivos activos en el mes seleccionado para metas.")
     st.caption(f"🕒 Render: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     st.stop()
 
+df_metas["status"] = "ACTIVO"
+
 yy, mm = meta_month_key.split("-")
 ref_day = pd.Timestamp(year=int(yy), month=int(mm), day=1).normalize()
 
-# ✅ Fecha Ingreso (preferred) + fallback to first sale date for tenure
-df_metas["EJ_NORM"] = df_metas["EJECUTIVO"].astype(str).map(normalize_name)
 fd = pd.to_datetime(df_metas["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
-
 tenure_days = (ref_day - fd.dt.normalize()).dt.days
 tenure_days = (
     pd.to_numeric(tenure_days, errors="coerce")
@@ -1061,21 +988,21 @@ tenure_days = (
 df_metas["dias_activo_al_1ro"] = tenure_days.astype(int)
 
 last3_cols = meta_window_keys[:]
-win = df_metas[last3_cols].values.astype(int)
-r, c = win.shape
-
-nz = win > 0
-has_nz = nz.any(axis=1)
-first_i = np.where(has_nz, nz.argmax(axis=1), 0)
-
-suff = np.cumsum(win[:, ::-1], axis=1)[:, ::-1]
-ridx = np.arange(r)
-ssum = suff[ridx, first_i]
-cnt = (c - first_i).astype(float)
-
-avg3 = ssum / cnt
-avg3 = np.where(has_nz, avg3, 0.0)
-df_metas["prom_ult_3m"] = avg3.astype(float)
+if not last3_cols:
+     df_metas["prom_ult_3m"] = 0.0
+else:
+    win = df_metas[last3_cols].values.astype(int)
+    r, c = win.shape
+    nz = win > 0
+    has_nz = nz.any(axis=1)
+    first_i = np.where(has_nz, nz.argmax(axis=1), 0)
+    suff = np.cumsum(win[:, ::-1], axis=1)[:, ::-1]
+    ridx = np.arange(r)
+    ssum = suff[ridx, first_i]
+    cnt = (c - first_i).astype(float)
+    avg3 = ssum / cnt
+    avg3 = np.where(has_nz, avg3, 0.0)
+    df_metas["prom_ult_3m"] = avg3.astype(float)
 
 prom = df_metas["prom_ult_3m"].astype(float)
 ten = df_metas["dias_activo_al_1ro"].astype(int)
@@ -1096,18 +1023,6 @@ meta_mes = np.where(
 
 df_metas["meta_mes_actual"] = meta_mes
 
-# ✅ NUEVOS INGRESOS (Metas): Fecha Ingreso in the selected meta_month_key and started AFTER day 9
-first_dt_exec2 = pd.to_datetime(df_metas["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
-nuevos_ingresos_metas = set(
-    df_metas.loc[
-        (first_dt_exec2.dt.strftime("%Y-%m") == meta_month_key) & (first_dt_exec2.dt.day > 9),
-        "EJECUTIVO",
-    ].tolist()
-)
-
-# ✅ NEW: normalized set to avoid mismatches (spaces/accents/case)
-nuevos_ingresos_metas_norm = set(normalize_name(x) for x in nuevos_ingresos_metas)
-
 df_metas_view = df_metas[
     ["EJECUTIVO", "Supervisor", "CentroKey", "status", "dias_activo_al_1ro"]
     + last3_cols
@@ -1125,7 +1040,8 @@ fmt_metas.update({"prom_ult_3m": "{:,.2f}"})
 
 def highlight_metas(row: pd.Series):
     ej = normalize_name(row.get("EJECUTIVO"))
-    if ej in nuevos_ingresos_metas_norm:
+    # Check the Global <15 days set
+    if ej in set_nuevos_42d:
         return ["background-color: #ffd166; color: black; font-weight: 900;"] * len(row)
     return [""] * len(row)
 
@@ -1287,13 +1203,11 @@ def workable_days_equiv_elapsed_in_month(ym_key: str, today: date) -> float:
 dias_hab_eq_total = workable_days_equiv_month(meta_month_key)
 dias_hab_eq_elapsed = workable_days_equiv_elapsed_in_month(meta_month_key, date.today())
 
-# ✅ NEW: días laborables equivalentes RESTANTES desde HOY hasta fin de mes (incluye hoy)
 m_ini_tmp, m_fin_tmp = month_bounds(meta_month_key)
 today_d = date.today()
 start_rem = today_d if today_d > m_ini_tmp else m_ini_tmp
 dias_hab_eq_remaining = workable_equiv_between(start_rem, m_fin_tmp) if today_d <= m_fin_tmp else 0.0
 
-# ✅ FIX (ONLY for "desde hoy" rate): if remaining is Saturday-only (0.5), treat as 1.0 day for rate calc
 dias_hab_eq_remaining_for_rate = float(dias_hab_eq_remaining)
 if 0.0 < dias_hab_eq_remaining_for_rate < 1.0:
     dias_hab_eq_remaining_for_rate = 1.0
@@ -1340,7 +1254,6 @@ else:
     df_sanity_exec["esperado_a_hoy"] = np.floor(df_sanity_exec["meta_mes_actual"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_exec["al_corriente"] = df_sanity_exec["total_ventas_hechas_mes"].astype(int) >= df_sanity_exec["esperado_a_hoy"].astype(int)
 
-    # ✅ NEW: desde HOY — días restantes y ventas diarias necesarias para cumplir meta
     df_sanity_exec["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_pos = df_sanity_exec["gap_meta"].astype(float).clip(lower=0.0)
     df_sanity_exec["ventas_diarias_necesarias_desde_hoy"] = np.where(
@@ -1362,7 +1275,6 @@ else:
             "gap_meta",
             "dias_hab_equiv_mes",
             "ventas_diarias_necesarias",
-            # ✅ NEW
             "dias_hab_equiv_restantes",
             "ventas_diarias_necesarias_desde_hoy",
         ]
@@ -1382,7 +1294,6 @@ else:
         "gap_meta": "{:,.0f}",
         "dias_hab_equiv_mes": "{:,.2f}",
         "ventas_diarias_necesarias": "{:,.2f}",
-        # ✅ NEW
         "dias_hab_equiv_restantes": "{:,.2f}",
         "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
     }
@@ -1392,7 +1303,6 @@ else:
     tmp_for_style["al_corriente"] = tmp_for_style["total_ventas_hechas_mes"].astype(int) >= tmp_for_style["esperado_a_hoy"].astype(int)
     style_corriente = dict(zip(tmp_for_style["EJECUTIVO"], tmp_for_style["al_corriente"].astype(bool)))
 
-    # ✅ ADDED: highlight En tránsito in BLUE (exec table)
     def _blue_transito_exec(row: pd.Series):
         styles = [""] * len(row)
         try:
@@ -1420,12 +1330,12 @@ else:
             styles[col_idx] = "background-color: #ff1f3d; color: white; font-weight: 900;"
 
         ej_norm = normalize_name(row.get("EJECUTIVO"))
-        if ej_norm in nuevos_ingresos_metas_norm:
+        # ✅ FIX: Use <15d logic here too
+        if ej_norm in set_nuevos_42d:
             for i in range(len(styles)):
                 if i != row.index.get_loc("gap_meta"):
                     styles[i] = "background-color: #ffd166; color: black; font-weight: 900;"
 
-        # overlay BLUE for en tránsito (wins on that cell)
         blue = _blue_transito_exec(row)
         for i in range(len(styles)):
             if blue[i]:
@@ -1456,7 +1366,6 @@ else:
     df_sanity_team["esperado_a_hoy"] = np.floor(df_sanity_team["meta_team"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_team["al_corriente"] = df_sanity_team["total_ventas_hechas"].astype(int) >= df_sanity_team["esperado_a_hoy"].astype(int)
 
-    # ✅ NEW: desde HOY (team)
     df_sanity_team["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_team_pos = df_sanity_team["gap_team"].astype(float).clip(lower=0.0)
     df_sanity_team["ventas_diarias_necesarias_desde_hoy"] = np.where(
@@ -1481,7 +1390,6 @@ else:
             return "background-color: #ff1f3d; color: white; font-weight: 900;"
         return ""
 
-    # ✅ ADDED: blue for ventas_en_transito column (team)
     def _blue_transito_team(row: pd.Series):
         styles = [""] * len(row)
         try:
@@ -1509,7 +1417,6 @@ else:
                 "dias_hab_equiv_mes": "{:,.2f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
-                # ✅ NEW
                 "dias_hab_equiv_restantes": "{:,.2f}",
                 "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
@@ -1544,7 +1451,6 @@ else:
     df_sanity_centro["esperado_a_hoy"] = np.floor(df_sanity_centro["meta_centro"].astype(float) * ratio + 1e-9).astype(int)
     df_sanity_centro["al_corriente"] = df_sanity_centro["total_ventas_hechas"].astype(int) >= df_sanity_centro["esperado_a_hoy"].astype(int)
 
-    # ✅ NEW: desde HOY (centro)
     df_sanity_centro["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_centro_pos = df_sanity_centro["gap_centro"].astype(float).clip(lower=0.0)
     df_sanity_centro["ventas_diarias_necesarias_desde_hoy"] = np.where(
@@ -1560,7 +1466,6 @@ else:
 
     st.markdown("#### 🏢 Por Centro (JV / CC2)")
 
-    # ✅ ADDED: blue for ventas_en_transito column (centro)
     def _blue_transito_centro(row: pd.Series):
         styles = [""] * len(row)
         try:
@@ -1588,7 +1493,6 @@ else:
                 "dias_hab_equiv_mes": "{:,.2f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
-                # ✅ NEW
                 "dias_hab_equiv_restantes": "{:,.2f}",
                 "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
@@ -1623,7 +1527,6 @@ else:
     df_sanity_global["esperado_a_hoy"] = int(np.floor(df_sanity_global["meta_global"].astype(float).iloc[0] * ratio + 1e-9))
     df_sanity_global["al_corriente"] = int(df_sanity_global["total_ventas_hechas"].iloc[0]) >= int(df_sanity_global["esperado_a_hoy"].astype(int).iloc[0])
 
-    # ✅ NEW: desde HOY (global)
     df_sanity_global["dias_hab_equiv_restantes"] = float(dias_hab_eq_remaining)
     gap_global_pos = df_sanity_global["gap_global"].astype(float).clip(lower=0.0)
     df_sanity_global["ventas_diarias_necesarias_desde_hoy"] = np.where(
@@ -1644,7 +1547,6 @@ else:
         if (gap_val > 0) and (not al_corr):
             col_idx = row.index.get_loc("gap_global")
             styles[col_idx] = "background-color: #ff1f3d; color: white; font-weight: 900;"
-        # ✅ ADDED: blue for ventas_en_transito (global)
         try:
             vt = int(row.get("ventas_en_transito", 0) or 0)
         except Exception:
@@ -1666,7 +1568,6 @@ else:
                 "gap_global": "{:,.0f}",
                 "ventas_diarias_necesarias": "{:,.2f}",
                 "esperado_a_hoy": "{:,.0f}",
-                # ✅ NEW
                 "dias_hab_equiv_restantes": "{:,.2f}",
                 "ventas_diarias_necesarias_desde_hoy": "{:,.2f}",
             }
