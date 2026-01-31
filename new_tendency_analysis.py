@@ -366,7 +366,7 @@ def load_programadas_split_by_exec(start_yyyymmdd: str, end_yyyymmdd: str) -> pd
       Status = 'En Transito' if Estatus in (En entrega, En preparacion, Solicitado, Back Office)
               OR (Estatus == 'Entregado' and Venta blank)
       Else Status = 'Entregado'
-    IMPORTANT: Canc Error is excluded from totals (like flag_Programada in Detalle General).
+    IMPORTANT: Canc Error is excluded from totals (Detalle General flag_Programada = Estatus != 'Canc Error').
     """
     q = build_programadas_query(start_yyyymmdd, end_yyyymmdd)
     df = read_sql(q)
@@ -625,7 +625,7 @@ if ej_selected:
 
 # ======================================================
 # ✅ 1) Filtro por MESES + semanas (defaults: últimos 3 meses)
-#     ✅ IMPORTANT: this filter is ONLY used for Simulación por Ejecutivo
+#      ✅ IMPORTANT: this filter is ONLY used for Simulación por Ejecutivo
 # ======================================================
 st.markdown("## Filtro por meses y semanas")
 
@@ -722,7 +722,7 @@ st.markdown("---")
 
 # ======================================================
 # ✅ 2) Simulación por Ejecutivo (incluye Supervisor)
-#     ✅ Uses df_ctx (interval filter)
+#      ✅ FIX: Status Real (Si DB dice BAJA, es BAJA)
 # ======================================================
 st.markdown("### ⬇️ Exportar Excel — Simulación por Ejecutivo (mes/intervalo actual)")
 
@@ -732,6 +732,17 @@ if df_export_base.empty:
     st.info("No hay datos para exportar simulación con el filtro actual.")
     st.caption(f"🕒 Render: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     st.stop()
+
+# ✅ FIX START: Crear mapa de Estatus Real desde Empleados
+# Tomamos el status de la tabla de empleados (reporte_empleado)
+# Agrupamos por nombre normalizado para evitar duplicados
+real_status_map = (
+    empleados.assign(EJ_NORM=empleados["Nombre"].map(normalize_name))
+    .groupby("EJ_NORM")["Estatus"]
+    .first()
+    .to_dict()
+)
+# ✅ FIX END
 
 months_selected = sorted(df_export_base["T_MonthKey"].dropna().unique().tolist())
 execs = sorted(df_export_base["EJECUTIVO"].dropna().unique().tolist())
@@ -799,12 +810,34 @@ avg_active = np.where(has_nonzero, avg_active, 0.0)
 
 df_sim["Promedio ventas meses"] = avg_active.astype(float)
 
-# ✅ last month of interval = chronologically max (NOT selection order)
+# ✅ FIX START: Use Database Status FIRST, fallback to sales activity
+df_sim["EJ_NORM"] = df_sim["EJECUTIVO"].astype(str).map(normalize_name)
+df_sim["status_db"] = df_sim["EJ_NORM"].map(real_status_map).fillna("UNKNOWN")
+
 last_month_interval = max(month_cols) if month_cols else ""
-df_sim["status"] = np.where(df_sim[last_month_interval] > 0, "ACTIVO", "BAJA")
+
+def resolve_status(row):
+    db_status = str(row["status_db"]).upper()
+    
+    # Priority 1: Explicit BAJA in Database
+    if db_status == "BAJA":
+        return "BAJA"
+    
+    # Priority 2: Explicit ACTIVO in Database
+    if db_status == "ACTIVO":
+        return "ACTIVO"
+    
+    # Priority 3: Unknown in DB (new emp not in master?) -> Check sales activity
+    sales_active = False
+    if last_month_interval and row[last_month_interval] > 0:
+        sales_active = True
+    
+    return "ACTIVO" if sales_active else "BAJA"
+
+df_sim["status"] = df_sim.apply(resolve_status, axis=1)
+# ✅ FIX END
 
 # ✅ Fecha Ingreso (preferred) + fallback to first sale date
-df_sim["EJ_NORM"] = df_sim["EJECUTIVO"].astype(str).map(normalize_name)
 first_dt_exec = pd.to_datetime(df_sim["EJ_NORM"].map(_get_ingreso_dt_for_norm), errors="coerce")
 
 # ✅ FIX: interval simulates metas for the NEXT month after the last month in the interval (always)
@@ -902,7 +935,7 @@ st.download_button(
 
 # ======================================================
 # ✅ 3) Metas del mes (incluye Supervisor + CentroKey)
-#     ✅ Uses meta_month_key as the MAIN filter for the rest of the page
+#      ✅ Uses meta_month_key as the MAIN filter for the rest of the page
 # ======================================================
 st.markdown("---")
 st.markdown("### 🎯 Metas del mes actual (solo ejecutivos activos)")
