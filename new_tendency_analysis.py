@@ -504,6 +504,20 @@ except Exception as e:
     st.code(str(e))
     st.stop()
 
+# ✅ NEW: Month helper to force months to exist even with 0 sales
+def _build_all_months_map(start_d: date, end_d: date) -> pd.DataFrame:
+    start_ms = pd.Timestamp(start_d.year, start_d.month, 1)
+    end_ms = pd.Timestamp(end_d.year, end_d.month, 1)
+    months = pd.date_range(start_ms, end_ms, freq="MS")
+    mm = pd.DataFrame({"T_MonthKey": months.strftime("%Y-%m")})
+    # month name consistent with your existing behavior (strftime("%B"))
+    mm["T_MonthName"] = months.strftime("%B")
+    mm["T_MonthLabel"] = mm["T_MonthKey"] + " (" + mm["T_MonthName"] + ")"
+    return mm
+
+all_months_map = _build_all_months_map(start_dt, end_dt)
+
+# NOTE: keep this behavior exactly (still stop if truly no data at all)
 if ventas.empty:
     st.error("No hay datos en el rango seleccionado.")
     st.stop()
@@ -514,11 +528,18 @@ ventas["T_MonthKey"] = ventas["T_DT"].dt.strftime("%Y-%m")
 ventas["T_MonthName"] = ventas["T_DT"].dt.strftime("%B")
 ventas["T_MonthLabel"] = ventas["T_MonthKey"] + " (" + ventas["T_MonthName"] + ")"
 
+# ✅ CHANGED: month_map_all includes months even if there are 0 sales (e.g., February)
 month_map_all = (
-    ventas[["T_MonthKey", "T_MonthLabel"]]
-    .dropna()
+    pd.concat(
+        [
+            ventas[["T_MonthKey", "T_MonthLabel"]].dropna(),
+            all_months_map[["T_MonthKey", "T_MonthLabel"]].dropna(),
+        ],
+        ignore_index=True,
+    )
     .drop_duplicates()
     .sort_values("T_MonthKey")
+    .reset_index(drop=True)
 )
 
 # ✅ NEW: build Fecha Ingreso map (by normalized name) for tenure + nuevos ingresos
@@ -601,11 +622,18 @@ if TYPE_CHECKING:
 
 df_ctx = ventas_flt.copy()
 
+# ✅ CHANGED: month_map includes months even if there are 0 sales (so February can appear)
 month_map = (
-    df_ctx[["T_MonthKey", "T_MonthLabel"]]
-    .dropna()
+    pd.concat(
+        [
+            df_ctx[["T_MonthKey", "T_MonthLabel"]].dropna(),
+            all_months_map[["T_MonthKey", "T_MonthLabel"]].dropna(),
+        ],
+        ignore_index=True,
+    )
     .drop_duplicates()
     .sort_values("T_MonthKey")
+    .reset_index(drop=True)
 )
 m_options = month_map["T_MonthLabel"].tolist()
 
@@ -1255,8 +1283,6 @@ else:
 
     df_sanity_exec.drop(columns=["hechas_mes", "transito_mes", "total_mes"], inplace=True, errors="ignore")
 
-    # Gap for INDIVIDUAL should probably reference their assigned meta (6)?
-    # But for sums we need the other one.
     # Let's keep gap_meta = meta_mes_actual - sales for the individual row
     df_sanity_exec["gap_meta"] = (
         df_sanity_exec["meta_mes_actual"].astype(int)
@@ -1359,7 +1385,6 @@ else:
         return styles
 
     st.markdown("#### 👤 Por ejecutivo (activo)")
-    # Drop meta_for_sum from view
     st.dataframe(
         df_sanity_exec.drop(columns=["meta_for_sum"]).style.apply(highlight_gap_dynamic, axis=1).format(fmt_sanity),
         hide_index=True,
@@ -1374,10 +1399,9 @@ else:
             ventas_en_transito=("ventas_en_transito_mes", "sum"),
             total_ventas_hechas=("total_ventas_hechas_mes", "sum"),
             meta_team=("meta_for_sum", "sum"),  # 👈 Sum depends on toggle
-            gap_team=("gap_meta", "sum"), # Wait, gap team should be meta_team - total_ventas
+            gap_team=("gap_meta", "sum"),
         )
     )
-    # Recalculate GAP Team using the sum of meta_for_sum
     df_sanity_team["gap_team"] = df_sanity_team["meta_team"].astype(int) - df_sanity_team["total_ventas_hechas"].astype(int)
 
     df_sanity_team["dias_hab_equiv_mes"] = float(dias_hab_eq_total)
@@ -1461,10 +1485,9 @@ else:
             ventas_hechas=("ventas_hechas_mes", "sum"),
             ventas_en_transito=("ventas_en_transito_mes", "sum"),
             total_ventas_hechas=("total_ventas_hechas_mes", "sum"),
-            meta_centro=("meta_for_sum", "sum"), # 👈 Sum depends on toggle
+            meta_centro=("meta_for_sum", "sum"),
         )
     )
-    # Recalculate GAP
     df_sanity_centro["gap_centro"] = df_sanity_centro["meta_centro"].astype(int) - df_sanity_centro["total_ventas_hechas"].astype(int)
 
     df_sanity_centro["dias_hab_equiv_mes"] = float(dias_hab_eq_total)
@@ -1540,10 +1563,9 @@ else:
             "ventas_hechas": int(df_sanity_exec["ventas_hechas_mes"].sum()),
             "ventas_en_transito": int(df_sanity_exec["ventas_en_transito_mes"].sum()),
             "total_ventas_hechas": int(df_sanity_exec["total_ventas_hechas_mes"].sum()),
-            "meta_global": int(df_sanity_exec["meta_for_sum"].sum()), # 👈 Sum depends on toggle
+            "meta_global": int(df_sanity_exec["meta_for_sum"].sum()),
         }]
     )
-    # Recalculate GAP Global
     df_sanity_global["gap_global"] = df_sanity_global["meta_global"].astype(int) - df_sanity_global["total_ventas_hechas"].astype(int)
     df_sanity_global["ventas_diarias_necesarias"] = float(df_sanity_global["meta_global"].sum()) / float(dias_hab_eq_total)
 
