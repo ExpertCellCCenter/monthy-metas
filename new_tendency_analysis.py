@@ -858,7 +858,7 @@ ten_sim = df_sim["dias_activo_al_1ro"].astype(int)
 
 # Meta logic
 df_sim["meta simulacion"] = np.where(
-    ten_sim < 41,
+    ten_sim < 42,
     6,
     np.where(
         prom_sim >= 7,
@@ -1053,7 +1053,7 @@ prom = df_metas["prom_ult_3m"].astype(float)
 ten = df_metas["dias_activo_al_1ro"].astype(int)
 
 meta_mes = np.where(
-    ten < 41,
+    ten < 42,
     6,
     np.where(
         prom >= 7,
